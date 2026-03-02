@@ -628,6 +628,44 @@ func getAllTerragruntFiles(path string) ([]string, error) {
 	return uniqueConfigFileAbsPaths, nil
 }
 
+// isTerragruntModuleDir returns true if the given path contains a Terragrunt module and false otherwise. The path
+// can not contain a cache, data, or download dir.
+func isTerragruntModuleDir(path string, terragruntOptions *options.TerragruntOptions) (bool, error) {
+	// Skip the Terragrunt cache dir
+	if util.ContainsPath(path, util.TerragruntCacheDir) {
+		return false, nil
+	}
+
+	// Skip the Terraform data dir
+	dataDir := terragruntOptions.TerraformDataDir()
+	if filepath.IsAbs(dataDir) {
+		if util.HasPathPrefix(path, dataDir) {
+			return false, nil
+		}
+	} else {
+		if util.ContainsPath(path, dataDir) {
+			return false, nil
+		}
+	}
+
+	canonicalPath, err := util.CanonicalPath(path, "")
+	if err != nil {
+		return false, err
+	}
+
+	canonicalDownloadPath, err := util.CanonicalPath(terragruntOptions.DownloadDir, "")
+	if err != nil {
+		return false, err
+	}
+
+	// Skip any custom download dir specified by the user
+	if strings.Contains(canonicalPath, canonicalDownloadPath) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
 // FindConfigFilesInPath returns a list of all Terragrunt config files in the given path or any subfolder of the path. A file is a Terragrunt
 // config file if it has a name as returned by the DefaultConfigPath method
 func FindConfigFilesInPath(rootPath string, opts *options.TerragruntOptions) ([]string, error) {
@@ -642,6 +680,12 @@ func FindConfigFilesInPath(rootPath string, opts *options.TerragruntOptions) ([]
 
 		if !info.IsDir() {
 			return nil
+		}
+
+		if ok, err := isTerragruntModuleDir(path, opts); err != nil {
+			return err
+		} else if !ok {
+			return filepath.SkipDir
 		}
 
 		for _, configFile := range []string{"root.hcl"} {
