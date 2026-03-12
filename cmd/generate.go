@@ -12,6 +12,7 @@ import (
 	"github.com/gruntwork-io/terragrunt/config"
 	"github.com/gruntwork-io/terragrunt/options"
 	"github.com/spf13/cobra"
+	"github.com/zclconf/go-cty/cty"
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -150,14 +151,9 @@ func getDependencies(ctx *config.ParsingContext, path string) ([]string, error) 
 			}
 		}
 
-		// Parse the HCL file
-		parseCtx := config.NewParsingContext(ctx, ctx.TerragruntOptions).
-			WithDecodeList(
-				config.DependencyBlock,
-				config.DependenciesBlock,
-				config.TerraformBlock,
-			)
-		parsedConfig, err := config.PartialParseConfigFile(parseCtx, path, nil)
+		// Parse the HCL file - use ParseConfigFile to get inputs
+		parseCtx := config.NewParsingContext(ctx, ctx.TerragruntOptions)
+		parsedConfig, err := config.ParseConfigFile(parseCtx, path, nil)
 		if err != nil {
 			getDependenciesCache.set(path, getDependenciesOutput{nil, err})
 			return nil, err
@@ -205,7 +201,24 @@ func getDependencies(ctx *config.ParsingContext, path string) ([]string, error) 
 
 				dependencies = append(dependencies, filepath.Join(parsedSource, "*.tf*"))
 
-				ls, err := parseTerraformLocalModuleSource(parsedSource)
+				// Try to get inputs from parsedConfig to pass to terraform-config-inspect
+				var inputs map[string]cty.Value
+				if parsedConfig.Inputs != nil {
+					inputs = make(map[string]cty.Value)
+					for k, v := range parsedConfig.Inputs {
+						// Convert interface{} to cty.Value
+						switch val := v.(type) {
+						case string:
+							inputs[k] = cty.StringVal(val)
+						case cty.Value:
+							if val.IsKnown() && !val.IsNull() {
+								inputs[k] = val
+							}
+						}
+					}
+				}
+
+				ls, err := parseTerraformLocalModuleSourceWithInputs(parsedSource, inputs)
 				if err != nil {
 					return nil, err
 				}
@@ -299,7 +312,25 @@ func getDependencies(ctx *config.ParsingContext, path string) ([]string, error) 
 		if filepath.Base(path) == "terragrunt.hcl" {
 			dir := filepath.Dir(path)
 
-			ls, err := parseTerraformLocalModuleSource(dir)
+			// Try to parse this terragrunt.hcl to get inputs
+			var inputs map[string]cty.Value
+			parseCtx2 := config.NewParsingContext(ctx, ctx.TerragruntOptions)
+			// Use ParseConfigFile to get full config including inputs
+			if parsedCfg, err := config.ParseConfigFile(parseCtx2, path, nil); err == nil && parsedCfg.Inputs != nil {
+				inputs = make(map[string]cty.Value)
+				for k, v := range parsedCfg.Inputs {
+					switch val := v.(type) {
+					case string:
+						inputs[k] = cty.StringVal(val)
+					case cty.Value:
+						if val.IsKnown() && !val.IsNull() {
+							inputs[k] = val
+						}
+					}
+				}
+			}
+
+			ls, err := parseTerraformLocalModuleSourceWithInputs(dir, inputs)
 			if err != nil {
 				return nil, err
 			}
@@ -1064,7 +1095,9 @@ func init() {
 // Runs a set of arguments, returning the output
 func RunWithFlags(filename string, args []string) ([]byte, error) {
 	rootCmd.SetArgs(args)
-	rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		return nil, err
+	}
 
 	return os.ReadFile(filename)
 }
